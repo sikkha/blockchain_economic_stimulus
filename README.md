@@ -2,7 +2,7 @@
 *A macroeconomic simulator and real-time digital settlement app*
 
 ## 🧭 What It Is
-**Thai-Boosty** is a prototype application that models and simulates a digital fiscal stimulus program — where government-issued wallets distribute funds that circulate locally under controlled leakages and VAT feedback.
+**blockchain_economic_stimulus** is a prototype application that models and simulates a digital fiscal stimulus program — where government-issued wallets distribute funds that circulate locally under controlled leakages and VAT feedback.
 
 The project integrates:
 - A **FastAPI backend** handling negotiation, settlement, and monitoring logic.  
@@ -38,3 +38,4 @@ Underlying principle:
    ```bash
    git clone https://github.com/<your-username>/hackathon_app.git
    cd hackathon_app
+   ./deploy.sh
