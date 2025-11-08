@@ -1,8 +1,8 @@
-# blockchain_economic_stimulus
+# Thai-Boosty ARC–USDC Stimulus  
 *A macroeconomic simulator and real-time digital settlement app*
 
 ## 🧭 What It Is
-**blockchain_economic_stimulus** is a prototype application that models and simulates a digital fiscal stimulus program — where government-issued wallets distribute funds that circulate locally under controlled leakages and VAT feedback.
+**Thai-Boosty** is a prototype application that models and simulates a digital fiscal stimulus program — where government-issued wallets distribute funds that circulate locally under controlled leakages and VAT feedback.
 
 The project integrates:
 - A **FastAPI backend** handling negotiation, settlement, and monitoring logic.  
@@ -38,4 +38,41 @@ Underlying principle:
    ```bash
    git clone https://github.com/<your-username>/hackathon_app.git
    cd hackathon_app
-   ./deploy.sh
+   ```
+
+2. **Build and run the Docker container**
+   ```bash
+   docker build -t thai-boosty .
+   docker run -p 4000:4000 thai-boosty
+   ```
+
+3. **Access the app**
+   - Frontend: [http://localhost:4000](http://localhost:4000)
+   - Backend API: [http://localhost:4000/docs](http://localhost:4000/docs)
+
+---
+
+## 🧩 Project Structure
+```
+hackathon_app/
+├── backend/        # FastAPI backend (agents, monitoring, simulation)
+├── frontend/       # React frontend dashboard
+├── data/           # SQLite DB and schema
+├── migrations/     # Database migrations
+├── improvise/      # Experimental scripts and demos
+├── Dockerfile      # Container setup
+├── deploy.sh       # One-command deployment
+└── start.sh        # Local startup helper
+```
+
+---
+
+## 🧠 Reference
+Based on the paper:  
+**“Dynamic Simulation of the Thai-Boosty ARC–USDC Stimulus”**  
+*AI Tensiblity (Kan Yuenyong)* — integrating DSGE logic, tiered leakage control, and VAT feedback in a digital economy simulation.
+
+---
+
+## 📄 License
+MIT License © 2025 AI Tensiblity
