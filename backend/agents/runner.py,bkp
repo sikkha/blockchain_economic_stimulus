@@ -1,0 +1,260 @@
+"""
+Agent runner module
+===================
+
+This module defines a simple agent routine for the ARC Hackathon dashboard.  The
+agent transfers a fixed amount of the ERC‑20 token from a designated payer
+wallet to a designated vendor wallet on the ARC testnet, looping until
+either the payer's balance is exhausted or a maximum number of transactions
+have been sent.  The routine also seeds the watcher database with agent
+metadata so that transactions are classified correctly by tier and
+eligibility.
+
+Configuration
+-------------
+
+The agent reads the following environment variables:
+
+```
+RPC_URL             - HTTPS RPC endpoint for ARC testnet (required)
+CHAIN_ID            - Chain ID (integer, required)
+TOKEN_ADDR          - Address of the deployed ERC‑20 token (required)
+PREFUNDED_PRIVATE_KEY (or AGENT_PAYER_PRIVATE_KEY) - Private key of the
+                      payer (required)
+AGENT_VENDOR_ADDR   - Address of the vendor receiving funds (required)
+AGENT_TRANSFER_UI   - Amount (in UI units) to send per transfer (default: 100)
+AGENT_NUM_TXS       - Maximum number of transfers to send (default: 5)
+AGENT_DECIMALS      - Override token decimals (optional; if not set, decimals
+                      are read from the contract)
+DB_PATH             - Path to SQLite database for watcher (default: /data/app.db)
+```
+
+Functions in this module should be invoked from a FastAPI endpoint or a
+background worker.  They return dictionaries summarising the actions
+performed.
+"""
+
+from __future__ import annotations
+
+import os
+import sqlite3
+import threading
+from typing import Optional, Dict, Any
+
+from web3 import Web3
+from eth_account import Account
+
+
+def _fee_params(w3: Web3) -> tuple[int, int]:
+    """Compute EIP‑1559 fee parameters (maxFeePerGas, maxPriorityFeePerGas)."""
+    latest = w3.eth.get_block("latest")
+    base = latest.get("baseFeePerGas") or w3.eth.gas_price
+    try:
+        tip = w3.eth.max_priority_fee
+    except Exception:
+        tip = max(1, w3.eth.gas_price // 10_000)
+    # Return maxFeePerGas and tip
+    return int(base + tip * 2), int(tip)
+
+
+def _seed_agents(payer_addr: str, vendor_addr: str, db_path: str) -> None:
+    """Insert payer and vendor entries into the agents table if they do not exist."""
+    payer_addr = payer_addr.lower()
+    vendor_addr = vendor_addr.lower()
+    with sqlite3.connect(db_path) as conn:
+        c = conn.cursor()
+        # Payer: type=payer, tier=1
+        c.execute(
+            """
+            INSERT OR IGNORE INTO agents (wallet, type, province, tier, meta_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (payer_addr, "payer", "", 1, "{}"),
+        )
+        # Vendor: type=vendor, tier=1
+        c.execute(
+            """
+            INSERT OR IGNORE INTO agents (wallet, type, province, tier, meta_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (vendor_addr, "vendor", "", 1, "{}"),
+        )
+        conn.commit()
+
+
+def run_simple_agent() -> Dict[str, Any]:
+    """
+    Execute a simple agent routine that transfers a fixed amount of tokens from
+    a payer to a vendor repeatedly.  Configuration is driven by environment
+    variables.  Returns a summary dict describing the execution.
+
+    If required environment variables are missing or an error occurs during
+    execution, the returned dict will contain an "error" key with details.
+    """
+    # Load environment
+    rpc_url = os.getenv("RPC_URL")
+    chain_id_str = os.getenv("CHAIN_ID")
+    token_addr = os.getenv("TOKEN_ADDR")
+    payer_pk = os.getenv("AGENT_PAYER_PRIVATE_KEY") or os.getenv("PREFUNDED_PRIVATE_KEY")
+    vendor_addr = os.getenv("AGENT_VENDOR_ADDR")
+    db_path = os.getenv("DB_PATH", "/data/app.db")
+    # Validate required env
+    missing = []
+    if not rpc_url:
+        missing.append("RPC_URL")
+    if not chain_id_str:
+        missing.append("CHAIN_ID")
+    if not token_addr:
+        missing.append("TOKEN_ADDR")
+    if not payer_pk:
+        missing.append("AGENT_PAYER_PRIVATE_KEY or PREFUNDED_PRIVATE_KEY")
+    if not vendor_addr:
+        missing.append("AGENT_VENDOR_ADDR")
+    if missing:
+        return {"error": f"Missing environment variables: {', '.join(missing)}"}
+    # Convert chain_id
+    try:
+        chain_id = int(chain_id_str)
+    except ValueError:
+        return {"error": f"Invalid CHAIN_ID: {chain_id_str}"}
+    # Connect to Web3
+    try:
+        w3 = Web3(Web3.HTTPProvider(rpc_url))
+        if not w3.is_connected():
+            return {"error": "RPC not reachable"}
+    except Exception as exc:
+        return {"error": f"Web3 connection error: {exc}"}
+    token_addr = Web3.to_checksum_address(token_addr)
+    vendor_addr = Web3.to_checksum_address(vendor_addr)
+    # Load payer account
+    try:
+        payer_account = Account.from_key(payer_pk)
+    except Exception as exc:
+        return {"error": f"Invalid private key: {exc}"}
+    # Prepare contract interface (minimal ABI with transfer, balanceOf, decimals)
+    abi = [
+        {
+            "inputs": [
+                {"internalType": "address", "name": "to", "type": "address"},
+                {"internalType": "uint256", "name": "value", "type": "uint256"},
+            ],
+            "name": "transfer",
+            "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
+            "stateMutability": "nonpayable",
+            "type": "function",
+        },
+        {
+            "inputs": [
+                {"internalType": "address", "name": "owner", "type": "address"},
+            ],
+            "name": "balanceOf",
+            "outputs": [
+                {"internalType": "uint256", "name": "", "type": "uint256"},
+            ],
+            "stateMutability": "view",
+            "type": "function",
+        },
+        {
+            "inputs": [],
+            "name": "decimals",
+            "outputs": [
+                {"internalType": "uint8", "name": "", "type": "uint8"},
+            ],
+            "stateMutability": "view",
+            "type": "function",
+        },
+    ]
+    token = w3.eth.contract(address=token_addr, abi=abi)
+    # Determine decimals
+    try:
+        decimals = token.functions.decimals().call()
+    except Exception:
+        # Fallback to env override or default 6
+        decimals = int(os.getenv("AGENT_DECIMALS", 6))
+    # Determine transfer amount (UI units)
+    try:
+        transfer_ui = float(os.getenv("AGENT_TRANSFER_UI", "100"))
+    except ValueError:
+        transfer_ui = 100.0
+    # Convert to raw amount
+    transfer_raw = int(transfer_ui * (10 ** decimals))
+    # Determine number of transfers
+    try:
+        num_txs = int(os.getenv("AGENT_NUM_TXS", "5"))
+    except ValueError:
+        num_txs = 5
+    summary: Dict[str, Any] = {
+        "tx_count": 0,
+        "transferred_ui": 0.0,
+        "errors": [],
+    }
+    # Seed agents in DB for watcher classification
+    try:
+        _seed_agents(payer_account.address, vendor_addr, db_path)
+    except Exception as exc:
+        summary["errors"].append(f"Seed agents failed: {exc}")
+    # Fetch payer balance
+    try:
+        balance_raw = token.functions.balanceOf(payer_account.address).call()
+        balance_ui = balance_raw / (10 ** decimals)
+    except Exception as exc:
+        summary["errors"].append(f"Failed to fetch balance: {exc}")
+        return summary
+    if balance_ui <= 0:
+        summary["errors"].append("Payer balance is zero; nothing to transfer")
+        return summary
+    # Determine fee parameters once (may update per tx if base fee changes)
+    try:
+        max_fee, tip = _fee_params(w3)
+    except Exception as exc:
+        summary["errors"].append(f"Failed to compute fee parameters: {exc}")
+        return summary
+    # Current nonce
+    try:
+        nonce = w3.eth.get_transaction_count(payer_account.address)
+    except Exception as exc:
+        summary["errors"].append(f"Failed to get nonce: {exc}")
+        return summary
+    # Main loop
+    for i in range(num_txs):
+        # Refresh balance for each iteration
+        try:
+            balance_raw = token.functions.balanceOf(payer_account.address).call()
+            balance_ui = balance_raw / (10 ** decimals)
+        except Exception as exc:
+            summary["errors"].append(f"Failed to fetch balance: {exc}")
+            break
+        if balance_ui < transfer_ui or balance_raw < transfer_raw:
+            # No more funds for another transfer
+            break
+        try:
+            tx = token.functions.transfer(vendor_addr, transfer_raw).build_transaction(
+                {
+                    "from": payer_account.address,
+                    "nonce": nonce,
+                    "chainId": chain_id,
+                    "type": 2,
+                    "maxFeePerGas": max_fee,
+                    "maxPriorityFeePerGas": tip,
+                }
+            )
+            # Estimate gas
+            gas = int(w3.eth.estimate_gas(tx))
+            tx["gas"] = gas
+            # Sign and send
+            signed = w3.eth.account.sign_transaction(tx, private_key=payer_account.key)
+            txh = w3.eth.send_raw_transaction(signed.raw_transaction)
+            receipt = w3.eth.wait_for_transaction_receipt(txh, timeout=120)
+            if receipt.status != 1:
+                summary["errors"].append(f"Tx {txh.hex()} failed")
+                # Do not increment nonce if failed
+                break
+            # Update counters
+            summary["tx_count"] += 1
+            summary["transferred_ui"] += transfer_ui
+            # Increment nonce
+            nonce += 1
+        except Exception as exc:
+            summary["errors"].append(f"Error during transfer: {exc}")
+            break
+    return summary

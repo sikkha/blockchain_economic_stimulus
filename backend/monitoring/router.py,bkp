@@ -1,0 +1,123 @@
+"""
+Monitoring API router for real‑time data.  Endpoints in this module will
+provide a stream of observed transactions and aggregated metrics from the
+ARC network.  The watcher subsystem should populate a SQLite database
+with normalized transfer events; these endpoints will read from that
+database and expose the data to the frontend.
+"""
+from fastapi import APIRouter, Request, Query
+import os
+import sqlite3
+
+# Read DB path from environment (fallback to default used in main.py)
+DB_PATH = os.getenv("DB_PATH", "/data/app.db")
+
+router = APIRouter()
+
+# Import agent runner
+try:
+    from ..agents.runner import run_simple_agent
+except Exception:
+    run_simple_agent = None  # type: ignore
+
+@router.get("/stream")
+async def get_stream(limit: int = Query(50, ge=1, le=500)) -> dict:
+    """
+    Return the most recent normalized transfer events, up to the specified
+    limit.  Events are ordered from newest to oldest by insertion ID.
+
+    Each event includes the transaction hash, timestamp (epoch), human
+    amount (UI units), raw amount, from/to addresses, originating and
+    destination tiers, whether the transaction was a mint, eligibility
+    flag (registered vendor), and any notes.  A limit of up to 500
+    events may be requested.
+    """
+    events = []
+    # Read the latest transactions from the database
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT txid, ts, from_address, to_address, amount_raw, amount_ui,
+                       tier_from, tier_to, is_mint, eligible, notes
+                FROM transactions
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+            for row in rows:
+                events.append(
+                    {
+                        "txid": row["txid"],
+                        "ts": row["ts"],
+                        "from": row["from_address"],
+                        "to": row["to_address"],
+                        "amount_raw": row["amount_raw"],
+                        "amount": row["amount_ui"],
+                        "tier_from": row["tier_from"],
+                        "tier_to": row["tier_to"],
+                        "is_mint": bool(row["is_mint"]),
+                        "eligible": bool(row["eligible"]),
+                        "notes": row["notes"],
+                    }
+                )
+    except Exception as exc:
+        # Log error and return empty list
+        print(f"Monitoring: error loading stream: {exc}")
+        events = []
+    return {"events": events}
+
+@router.get("/metrics")
+async def get_metrics(request: Request) -> dict:
+    """
+    Return aggregated real‑time metrics for the monitoring dashboard.  These
+    metrics are derived from the SQLite metrics table and represent the
+    cumulative observed money creation (m1_obs), leakage, VAT estimate,
+    and count of active SMEs.  The watcher maintains this table.
+    """
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT m1_obs, leakage, vat_est, smes_active FROM metrics WHERE id=1"
+            )
+            row = cur.fetchone()
+            if row:
+                return {
+                    "m1_obs": row[0],
+                    "leakage": row[1],
+                    "vat_est": row[2],
+                    "smes_active": row[3],
+                }
+    except Exception as exc:
+        print(f"Monitoring: error loading metrics: {exc}")
+    # Fallback if metrics unavailable
+    return {
+        "m1_obs": 0.0,
+        "leakage": 0.0,
+        "vat_est": 0.0,
+        "smes_active": 0,
+    }
+
+
+@router.post("/enact")
+async def enact_agents() -> dict:
+    """
+    Trigger the simple agent to transfer funds from a payer to a vendor.  The
+    agent uses environment variables for configuration.  Returns a summary
+    dictionary with the number of transactions sent and total UI amount
+    transferred.  If the agent runner is not available or configuration is
+    missing, returns an error.
+    """
+    if not run_simple_agent:
+        return {"error": "Agent runner not available"}
+    # Run the agent synchronously and return its summary
+    try:
+        result = run_simple_agent()
+        return result
+    except Exception as exc:
+        return {"error": str(exc)}

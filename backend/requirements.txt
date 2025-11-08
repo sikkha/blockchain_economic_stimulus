@@ -1,0 +1,7 @@
+
+fastapi==0.115.2
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+# Use a Web3 version compatible with Python 3.11. 6.11.5 is not available
+# for Python >=3.11; pin to 6.11.4 instead.
+web3==6.11.4
