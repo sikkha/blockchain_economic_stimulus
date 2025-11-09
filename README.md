@@ -69,8 +69,9 @@ hackathon_app/
 
 ## 🧠 Reference
 Based on the paper:  
-**“[https://github.com/sikkha/blockchain_economic_stimulus/blob/main/Document/Thai_boosty_policy.pdf|Dynamic Simulation of the Thai-Boosty ARC–USDC Stimulus]”**  
+**[Dynamic Simulation of the Thai-Boosty ARC–USDC Stimulus](https://github.com/sikkha/blockchain_economic_stimulus/blob/main/Document/Thai_boosty_policy.pdf)**  
 *AI Tensiblity (Kan Yuenyong)* — integrating DSGE logic, tiered leakage control, and VAT feedback in a digital economy simulation.
+
 
 ---
 
